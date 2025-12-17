@@ -53,7 +53,6 @@ class UBZDocument:
     def create_from_folder(folder_path: str, output_path: str) -> 'UBZDocument':
         """Create a UBZ document from a folder containing SVG files"""
         files_dict = {}
-        svg_files = []
         
         # Walk through the folder and collect all SVG files
         for root, dirs, files in os.walk(folder_path):
@@ -67,11 +66,6 @@ class UBZDocument:
                     
                     with open(full_path, 'rb') as f:
                         files_dict[rel_path] = f.read()
-                    
-                    if 'thumb' not in file.lower() and 'thumbnail' not in file.lower():
-                        svg_files.append(rel_path)
-        
-        svg_files.sort()
         
         # Create the UBZ file
         with zipfile.ZipFile(output_path, 'w', compression=zipfile.ZIP_DEFLATED) as z:
@@ -222,6 +216,8 @@ class MainWindow(QWidget):
             folder_name = os.path.basename(pres_folder)
             if not folder_name:  # Root folder
                 folder_name = os.path.basename(os.path.dirname(pres_folder))
+            if not folder_name:  # Still empty, use a default name
+                folder_name = 'presentation'
             
             # Create a unique output path
             output_filename = folder_name + '.ubz'
