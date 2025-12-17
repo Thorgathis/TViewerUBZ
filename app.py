@@ -6,7 +6,8 @@ from typing import List, Dict
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QListWidget, QLabel, QPushButton, QHBoxLayout,
-    QVBoxLayout, QFileDialog, QMessageBox, QListWidgetItem, QScrollArea, QFrame
+    QVBoxLayout, QFileDialog, QMessageBox, QListWidgetItem, QScrollArea, QFrame,
+    QInputDialog, QProgressDialog
 )
 from PyQt6.QtGui import QPixmap, QPainter, QDragEnterEvent, QDropEvent
 from PyQt6.QtCore import Qt
@@ -48,6 +49,38 @@ class UBZDocument:
         if overwrite:
             os.replace(out_path, self.path)
 
+    @staticmethod
+    def create_from_folder(folder_path: str, output_path: str) -> 'UBZDocument':
+        """Create a UBZ document from a folder containing SVG files"""
+        files_dict = {}
+        svg_files = []
+        
+        # Walk through the folder and collect all SVG files
+        for root, dirs, files in os.walk(folder_path):
+            for file in files:
+                if file.lower().endswith('.svg'):
+                    full_path = os.path.join(root, file)
+                    # Create relative path from folder_path
+                    rel_path = os.path.relpath(full_path, folder_path)
+                    # Normalize path separators for zip
+                    rel_path = rel_path.replace('\\', '/')
+                    
+                    with open(full_path, 'rb') as f:
+                        files_dict[rel_path] = f.read()
+                    
+                    if 'thumb' not in file.lower() and 'thumbnail' not in file.lower():
+                        svg_files.append(rel_path)
+        
+        svg_files.sort()
+        
+        # Create the UBZ file
+        with zipfile.ZipFile(output_path, 'w', compression=zipfile.ZIP_DEFLATED) as z:
+            for rel_path, data in files_dict.items():
+                z.writestr(rel_path, data)
+        
+        # Return a UBZDocument instance
+        return UBZDocument(output_path)
+
 
 class MainWindow(QWidget):
     def __init__(self):
@@ -81,6 +114,8 @@ class MainWindow(QWidget):
 
         open_btn = QPushButton('Open')
         open_btn.clicked.connect(self.open_file)
+        open_folder_btn = QPushButton('Import Folder')
+        open_folder_btn.clicked.connect(self.import_folder)
         save_btn = QPushButton('Save As')
         save_btn.clicked.connect(self.save_as)
         overwrite_btn = QPushButton('Overwrite')
@@ -96,13 +131,15 @@ class MainWindow(QWidget):
 
         row1 = make_row([zoom_in_btn, zoom_out_btn, fit_btn])
         row2 = make_row([prev_btn, next_btn, del_btn])
-        row3 = make_row([open_btn, save_btn, overwrite_btn])
+        row3 = make_row([open_btn, open_folder_btn])
+        row4 = make_row([save_btn, overwrite_btn])
 
         left_layout = QVBoxLayout()
         left_layout.addWidget(self.list, 1)
         left_layout.addWidget(row1)
         left_layout.addWidget(row2)
         left_layout.addWidget(row3)
+        left_layout.addWidget(row4)
 
         self.preview_label = QLabel('Preview')
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -119,7 +156,8 @@ class MainWindow(QWidget):
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.toLocalFile().lower().endswith(".ubz"):
+                path = url.toLocalFile()
+                if path.lower().endswith(".ubz") or os.path.isdir(path):
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -129,6 +167,10 @@ class MainWindow(QWidget):
             path = url.toLocalFile()
             if path.lower().endswith(".ubz"):
                 self.load_file(path)
+                break
+            elif os.path.isdir(path):
+                # Handle folder drop - convert to UBZ
+                self._convert_dropped_folder(path)
                 break
 
     def load_file(self, path: str):
@@ -144,6 +186,74 @@ class MainWindow(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, 'Open UBZ file', '', 'UBZ Files (*.ubz);;All files (*)')
         if path:
             self.load_file(path)
+
+    def import_folder(self):
+        """Import a folder containing presentations and convert them to UBZ"""
+        folder_path = QFileDialog.getExistingDirectory(self, 'Select Folder with Presentations')
+        if not folder_path:
+            return
+        
+        # Find all subdirectories that contain SVG files
+        presentation_folders = []
+        for root, dirs, files in os.walk(folder_path):
+            svg_files = [f for f in files if f.lower().endswith('.svg')]
+            if svg_files:
+                presentation_folders.append(root)
+        
+        if not presentation_folders:
+            QMessageBox.warning(self, 'No Presentations', 'No folders with SVG files found.')
+            return
+        
+        # Ask where to save converted UBZ files
+        output_dir = QFileDialog.getExistingDirectory(self, 'Select Output Directory for UBZ Files', folder_path)
+        if not output_dir:
+            return
+        
+        # Create progress dialog
+        progress = QProgressDialog('Converting presentations to UBZ...', 'Cancel', 0, len(presentation_folders), self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        
+        converted_count = 0
+        for i, pres_folder in enumerate(presentation_folders):
+            if progress.wasCanceled():
+                break
+            
+            # Generate output filename from folder name
+            folder_name = os.path.basename(pres_folder)
+            if not folder_name:  # Root folder
+                folder_name = os.path.basename(os.path.dirname(pres_folder))
+            
+            # Create a unique output path
+            output_filename = folder_name + '.ubz'
+            output_path = os.path.join(output_dir, output_filename)
+            
+            # Handle duplicate names
+            counter = 1
+            while os.path.exists(output_path):
+                output_filename = f'{folder_name}_{counter}.ubz'
+                output_path = os.path.join(output_dir, output_filename)
+                counter += 1
+            
+            try:
+                UBZDocument.create_from_folder(pres_folder, output_path)
+                converted_count += 1
+            except Exception as e:
+                QMessageBox.warning(self, 'Conversion Error', f'Failed to convert {pres_folder}: {e}')
+            
+            progress.setValue(i + 1)
+        
+        progress.close()
+        
+        if converted_count > 0:
+            msg = f'Successfully converted {converted_count} presentation(s) to UBZ format.'
+            QMessageBox.information(self, 'Import Complete', msg)
+            
+            # Ask if user wants to open one of the converted files
+            reply = QMessageBox.question(self, 'Open File', 'Do you want to open one of the converted files?')
+            if reply == QMessageBox.StandardButton.Yes:
+                path, _ = QFileDialog.getOpenFileName(self, 'Open UBZ file', output_dir, 'UBZ Files (*.ubz);;All files (*)')
+                if path:
+                    self.load_file(path)
 
     def populate_page_list(self):
         self.list.clear()
@@ -254,6 +364,40 @@ class MainWindow(QWidget):
         row = self.list.currentRow()
         if row < self.list.count() - 1:
             self.list.setCurrentRow(row + 1)
+
+    def _convert_dropped_folder(self, folder_path: str):
+        """Convert a dropped folder to UBZ"""
+        # Check if folder contains SVG files
+        has_svgs = False
+        for root, dirs, files in os.walk(folder_path):
+            if any(f.lower().endswith('.svg') for f in files):
+                has_svgs = True
+                break
+        
+        if not has_svgs:
+            QMessageBox.warning(self, 'No SVG Files', 'The dropped folder does not contain any SVG files.')
+            return
+        
+        # Generate output filename
+        folder_name = os.path.basename(folder_path)
+        parent_dir = os.path.dirname(folder_path)
+        output_filename = folder_name + '.ubz'
+        output_path = os.path.join(parent_dir, output_filename)
+        
+        # Handle duplicate names
+        counter = 1
+        while os.path.exists(output_path):
+            output_filename = f'{folder_name}_{counter}.ubz'
+            output_path = os.path.join(parent_dir, output_filename)
+            counter += 1
+        
+        try:
+            self.doc = UBZDocument.create_from_folder(folder_path, output_path)
+            self.current_scale = 1.0
+            self.populate_page_list()
+            QMessageBox.information(self, 'Conversion Complete', f'Folder converted to: {output_path}')
+        except Exception as e:
+            QMessageBox.critical(self, 'Conversion Error', f'Failed to convert folder: {e}')
 
 
 if __name__ == '__main__':
